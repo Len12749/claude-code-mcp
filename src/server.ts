@@ -32,6 +32,8 @@ const READ_ONLY_SYSTEM_PROMPT = [
   'Never attempt to create, modify or delete files, run shell commands, install packages or fetch URLs;',
   'those tools are not available, so describe the change instead of applying it.',
   'Ground every answer in concrete file paths (and line numbers when useful).',
+  'Never expose secrets found in the repository (API keys, passwords, tokens, private keys,',
+  'database connection strings, personal data): mask or omit them, never quote them verbatim.',
   'If the requested information is not in the code, say so instead of guessing.',
 ].join(' ');
 
