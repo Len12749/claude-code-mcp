@@ -41,19 +41,18 @@ This method is suitable if you prefer not to install the server globally or want
     ```
     **Important:** Replace `/absolute/path/to/claude-mcp-server` with the actual absolute path to where you cloned the server.
 
-5.  **First-Time Claude CLI Permissions:**
-    As mentioned in the main README, ensure you've run the Claude CLI once with `--dangerously-skip-permissions` to accept terms:
+5.  **First-Time Claude CLI Setup:**
+    Run the Claude CLI once to log in and confirm it works interactively. No permission bypass is needed any more: this fork always runs Claude Code in read-only mode (`--tools Read,Grep,Glob --restricted`).
     ```bash
-    claude -p "hello" --dangerously-skip-permissions
-    # Or ~/.claude/local/claude -p "hello" --dangerously-skip-permissions
+    claude -p "hello"
     ```
 
 6.  **Environment Variables for `start.sh` (Optional):**
     You can customize the server behavior by setting environment variables before running `start.sh` or by editing the `start.sh` script itself:
     - `CLAUDE_CLI_PATH`: Set a custom absolute path to the Claude CLI executable.
     - `MCP_CLAUDE_DEBUG`: Set to `true` to enable verbose debug logging from the MCP server.
-    - `CLAUDE_CLI_TOOLS_DEFAULT`: Comma-separated list of default tools.
-    - `CLAUDE_CLI_TOOLS_DANGEROUS`: Comma-separated list of tools to always enable.
+    - `CLAUDE_CODE_MCP_TOOLS`: Restrict the read-only tool whitelist further (subset of `Read,Grep,Glob`).
+    - `CLAUDE_CODE_MCP_ALLOWED_ROOTS`: Colon-separated roots that `workFolder` must live under.
     Refer to `start.sh` and the main README's "Configuration via Environment Variables" section for more details.
 
 ## Option 2: Local Development with `npm link`

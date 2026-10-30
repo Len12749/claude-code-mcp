@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { EventEmitter } from 'node:events';
 
 // Store original process.env
@@ -55,6 +56,8 @@ const mockReadFileSync = vi.mocked(readFileSync);
 const mockWriteFileSync = vi.mocked(writeFileSync);
 const mockSpawn = vi.mocked(spawn);
 const mockHomedir = vi.mocked(homedir);
+const mockRealpathSync = vi.mocked(realpathSync);
+const mockStatSync = vi.mocked(statSync);
 
 // Helper to setup Server mock with proper handlers
 function setupServerMock() {
@@ -111,6 +114,15 @@ describe('ClaudeCodeServer Unit Tests', () => {
     });
     mockMkdirSync.mockReturnValue(undefined as any);
     mockWriteFileSync.mockReturnValue(undefined);
+    // workFolder 校验会解析真实路径,这里给出稳定的替身实现
+    mockRealpathSync.mockImplementation(((value: string) => String(value)) as any);
+    mockStatSync.mockReturnValue({ isDirectory: () => true } as any);
+    // mockReset 会清掉模块工厂里的实现,这里恢复 McpError 的真实行为
+    vi.mocked(McpError).mockImplementation(((code: any, message: any) => {
+      const error = new Error(String(message));
+      (error as any).code = code;
+      return error as any;
+    }) as any);
   });
 
   afterEach(() => {
@@ -476,7 +488,9 @@ describe('ClaudeCodeServer Unit Tests', () => {
 
       expect(result.tools).toHaveLength(1);
       expect(result.tools[0].name).toBe('claude_code');
-      expect(result.tools[0].description).toContain('Claude Code Agent');
+      expect(result.tools[0].description).toContain('Read-only code analysis');
+      expect(result.tools[0].inputSchema.required).toEqual(['prompt', 'workFolder']);
+      expect(result.tools[0].inputSchema.properties).not.toHaveProperty('permissionMode');
     });
 
     it('should handle CallToolRequest', async () => {
@@ -521,11 +535,22 @@ describe('ClaudeCodeServer Unit Tests', () => {
       const result = await promise;
       expect(result.content[0].type).toBe('text');
       expect(result.content[0].text).toBe('tool output');
-      expect(mockSpawn.mock.calls[0][1]).toContain('--dangerously-skip-permissions');
-      expect(mockSpawn.mock.calls[0][1]).not.toContain('--permission-mode');
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toEqual(
+        expect.arrayContaining([
+          '--tools',
+          'Read,Grep,Glob',
+          '--restricted',
+          '--strict-mcp-config',
+          '--output-format',
+          'json',
+        ])
+      );
+      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+      expect(spawnArgs).not.toContain('--permission-mode');
     });
 
-    it('should pass explicit Claude permission mode without bypassing permissions', async () => {
+    it('should ignore caller-provided permissionMode and stay read-only', async () => {
       mockHomedir.mockReturnValue('/home/user');
       mockExistsSync.mockReturnValue(true);
 
@@ -548,7 +573,7 @@ describe('ClaudeCodeServer Unit Tests', () => {
           arguments: {
             prompt: 'test prompt',
             workFolder: process.platform === 'win32' ? 'C:\\tmp' : '/tmp',
-            permissionMode: 'default'
+            permissionMode: 'bypassPermissions'
           }
         }
       });
@@ -560,12 +585,12 @@ describe('ClaudeCodeServer Unit Tests', () => {
 
       await promise;
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
-      expect(spawnArgs).toContain('--permission-mode');
-      expect(spawnArgs).toContain('default');
+      expect(spawnArgs).toContain('--restricted');
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+      expect(spawnArgs).not.toContain('--permission-mode');
     });
 
-    it('should reject invalid Claude permission mode', async () => {
+    it('should require an absolute workFolder', async () => {
       mockHomedir.mockReturnValue('/home/user');
       mockExistsSync.mockReturnValue(true);
 
@@ -581,21 +606,14 @@ describe('ClaudeCodeServer Unit Tests', () => {
       const handler = callToolCall[1];
       const spawnCallsBefore = mockSpawn.mock.calls.length;
 
-      let caughtError: unknown;
-      try {
-        await handler({
+      await expect(
+        handler({
           params: {
             name: 'claude_code',
-            arguments: {
-              prompt: 'test prompt',
-              permissionMode: 'sandbox'
-            }
+            arguments: { prompt: 'test prompt' }
           }
-        });
-      } catch (error) {
-        caughtError = error;
-      }
-      expect(caughtError).toBeTruthy();
+        })
+      ).rejects.toThrow(/workFolder/);
       expect(mockSpawn.mock.calls).toHaveLength(spawnCallsBefore);
     });
 
@@ -764,61 +782,45 @@ describe('ClaudeCodeServer Unit Tests', () => {
       expect(spawnArgs.at(-1)).toBe('continue');
     });
 
-    it('should handle non-existent workFolder', async () => {
+    it('should reject a non-existent workFolder instead of falling back to home', async () => {
       // Create a non-existent path that works on both platforms
       const nonExistentPath = process.platform === 'win32'
         ? 'C:\\nonexistent_path_12345'
         : '/nonexistent_path_12345';
 
       mockHomedir.mockReturnValue('/home/user');
-      mockExistsSync.mockImplementation((path) => {
-        const pathStr = String(path);
-        // Make the CLI path exist but the workFolder not exist
-        if (pathStr.includes('.claude')) return true;
-        if (pathStr.includes('nonexistent_path_12345')) return false;
-        return false;
-      });
-
-      // Enable debug mode to see warning messages
-      process.env.MCP_CLAUDE_DEBUG = 'true';
+      mockExistsSync.mockImplementation((path) => String(path).includes('.claude'));
+      mockRealpathSync.mockImplementation(((value: string) => {
+        if (String(value).includes('nonexistent_path_12345')) {
+          throw new Error('ENOENT');
+        }
+        return String(value);
+      }) as any);
 
       const module = await import('../server.js');
       const { ClaudeCodeServer } = module;
       const server = new ClaudeCodeServer();
       const mockServerInstance = vi.mocked(Server).mock.results[0].value;
 
-      // Find the CallToolRequest handler
       const callToolCall = mockServerInstance.setRequestHandler.mock.calls.find(
         (call: any[]) => call[0].name === 'callTool'
       );
 
       const handler = callToolCall[1];
+      const spawnCallsBefore = mockSpawn.mock.calls.length;
 
-      // Create mock response
-      const mockProcess = createMockProcess();
-      mockSpawn.mockReturnValue(mockProcess);
-
-      const promise = handler({
-        params: {
-          name: 'claude_code',
-          arguments: {
-            prompt: 'test',
-            workFolder: nonExistentPath
+      await expect(
+        handler({
+          params: {
+            name: 'claude_code',
+            arguments: {
+              prompt: 'test',
+              workFolder: nonExistentPath
+            }
           }
-        }
-      });
-
-      // Simulate execution
-      setTimeout(() => {
-        mockProcess.emit('close', 0);
-      }, 10);
-
-      await promise;
-
-      // Check that a warning was logged about the non-existent workFolder
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[Warning] Specified workFolder does not exist')
-      );
+        })
+      ).rejects.toThrow(/workFolder does not exist/);
+      expect(mockSpawn.mock.calls).toHaveLength(spawnCallsBefore);
     });
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { z } from 'zod';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
@@ -31,6 +31,8 @@ vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
 }));
 
 const mockExistsSync = vi.mocked(existsSync);
+const mockRealpathSync = vi.mocked(realpathSync);
+const mockStatSync = vi.mocked(statSync);
 const mockHomedir = vi.mocked(homedir);
 
 describe('Argument Validation Tests', () => {
@@ -60,6 +62,8 @@ describe('Argument Validation Tests', () => {
     vi.clearAllMocks();
     vi.resetModules();
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRealpathSync.mockImplementation(((value: string) => String(value)) as any);
+    mockStatSync.mockReturnValue({ isDirectory: () => true } as any);
   });
 
   describe('Tool Arguments Schema', () => {
@@ -86,14 +90,14 @@ describe('Argument Validation Tests', () => {
       // Extract schema from tool definition
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string().optional(),
-        permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']).optional()
+        workFolder: z.string(),
+        sessionId: z.string().optional()
       });
       
       // Test valid cases
-      expect(() => schema.parse({ prompt: 'test' })).not.toThrow();
       expect(() => schema.parse({ prompt: 'test', workFolder: '/tmp' })).not.toThrow();
-      expect(() => schema.parse({ prompt: 'test', permissionMode: 'default' })).not.toThrow();
+      expect(() => schema.parse({ prompt: 'test', workFolder: '/tmp', sessionId: 's1' })).not.toThrow();
+      expect(() => schema.parse({ prompt: 'test' })).toThrow(); // workFolder 必填
     });
 
     it('should reject invalid arguments', async () => {
@@ -119,28 +123,28 @@ describe('Argument Validation Tests', () => {
       // Extract schema from tool definition
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string().optional(),
-        permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']).optional()
+        workFolder: z.string(),
+        sessionId: z.string().optional()
       });
       
       // Test invalid cases
       expect(() => schema.parse({})).toThrow(); // Missing prompt
       expect(() => schema.parse({ prompt: 123 })).toThrow(); // Wrong type
       expect(() => schema.parse({ prompt: 'test', workFolder: 123 })).toThrow(); // Wrong workFolder type
-      expect(() => schema.parse({ prompt: 'test', permissionMode: 'sandbox' })).toThrow(); // Unknown permission mode
     });
 
     it('should handle missing required fields', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string().optional(),
-        permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']).optional()
+        workFolder: z.string(),
+        sessionId: z.string().optional()
       });
       
       try {
         schema.parse({});
       } catch (error: any) {
-        expect(error.errors[0].path).toEqual(['prompt']);
+        const paths = error.errors.map((issue: any) => issue.path[0]);
+        expect(paths).toEqual(expect.arrayContaining(['prompt', 'workFolder']));
         expect(error.errors[0].message).toContain('Required');
       }
     });
@@ -148,28 +152,29 @@ describe('Argument Validation Tests', () => {
     it('should allow optional fields to be undefined', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string().optional(),
-        permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']).optional()
+        workFolder: z.string(),
+        sessionId: z.string().optional()
       });
       
-      const result = schema.parse({ prompt: 'test' });
-      expect(result.workFolder).toBeUndefined();
+      const result = schema.parse({ prompt: 'test', workFolder: '/tmp' });
+      expect(result.sessionId).toBeUndefined();
     });
 
     it('should handle extra fields gracefully', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string().optional(),
-        permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']).optional()
+        workFolder: z.string(),
+        sessionId: z.string().optional()
       });
       
       // By default, Zod strips unknown keys
       const result = schema.parse({ 
-        prompt: 'test', 
+        prompt: 'test',
+        workFolder: '/tmp',
         extraField: 'ignored' 
       });
       
-      expect(result).toEqual({ prompt: 'test' });
+      expect(result).toEqual({ prompt: 'test', workFolder: '/tmp' });
       expect(result).not.toHaveProperty('extraField');
     });
   });
@@ -240,6 +245,7 @@ describe('Argument Validation Tests', () => {
           name: 'claude_code',
           arguments: {
             prompt: '', // Empty prompt
+            workFolder: '/tmp',
           }
         }
       });

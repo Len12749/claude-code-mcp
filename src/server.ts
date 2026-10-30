@@ -9,7 +9,7 @@ import {
   type ServerResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,19 @@ const SERVER_VERSION = "1.10.12";
 // Define debugMode globally using const
 const debugMode = process.env.MCP_CLAUDE_DEBUG === 'true';
 const DEFAULT_CLAUDE_CLI_TIMEOUT_SECONDS = 3600;
+
+// 只读代码分析:这些是模型唯一能拿到的内置工具,写文件、执行命令、联网的工具都不在其中。
+const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'] as const;
+
+// 追加到 CLI 系统提示,防止模型在只读环境里反复尝试越权操作。
+const READ_ONLY_SYSTEM_PROMPT = [
+  'You are running in READ-ONLY code analysis mode.',
+  'You can only inspect the codebase with the Read, Grep and Glob tools.',
+  'Never attempt to create, modify or delete files, run shell commands, install packages or fetch URLs;',
+  'those tools are not available, so describe the change instead of applying it.',
+  'Ground every answer in concrete file paths (and line numbers when useful).',
+  'If the requested information is not in the code, say so instead of guessing.',
+].join(' ');
 
 // Track if this is the first tool use for version printing
 let isFirstToolUse = true;
@@ -53,6 +66,67 @@ export function resolveClaudeCliTimeoutMs(envValue = process.env.CLAUDE_CLI_TIME
   }
 
   return seconds * 1000;
+}
+
+/**
+ * 解析只读工具白名单。环境变量只能在此基础上收窄,不能引入 Bash/Edit/Write 等工具。
+ */
+export function resolveReadOnlyTools(envValue = process.env.CLAUDE_CODE_MCP_TOOLS): string[] {
+  const raw = envValue?.trim();
+  if (!raw) {
+    return [...READ_ONLY_TOOLS];
+  }
+
+  const requested = raw.split(/[\s,]+/).filter(Boolean);
+  const unknown = requested.filter((tool) => !(READ_ONLY_TOOLS as readonly string[]).includes(tool));
+  if (requested.length === 0 || unknown.length > 0) {
+    debugLog(`[Warning] Ignoring CLAUDE_CODE_MCP_TOOLS="${raw}" (allowed: ${READ_ONLY_TOOLS.join(', ')}).`);
+    return [...READ_ONLY_TOOLS];
+  }
+
+  return [...new Set(requested)];
+}
+
+/**
+ * 校验并规范化 workFolder:必须是已存在的目录(解析符号链接后再判断)。
+ * 若设置了 CLAUDE_CODE_MCP_ALLOWED_ROOTS(冒号分隔),目录必须落在其中之一。
+ */
+export function resolveWorkFolder(input: string): string {
+  if (!path.isAbsolute(input)) {
+    throw new Error(`workFolder must be an absolute path: ${input}`);
+  }
+
+  let resolved: string;
+  try {
+    resolved = realpathSync(input);
+  } catch {
+    throw new Error(`workFolder does not exist: ${input}`);
+  }
+
+  if (!statSync(resolved).isDirectory()) {
+    throw new Error(`workFolder is not a directory: ${input}`);
+  }
+
+  const roots = (process.env.CLAUDE_CODE_MCP_ALLOWED_ROOTS ?? '')
+    .split(':')
+    .map((root) => root.trim())
+    .filter(Boolean);
+  if (roots.length > 0) {
+    const allowed = roots.some((root) => {
+      try {
+        const rootPath = realpathSync(root);
+        return resolved === rootPath || resolved.startsWith(rootPath.endsWith(path.sep) ? rootPath : rootPath + path.sep);
+      } catch {
+        debugLog(`[Warning] Igoring non-existent allowed root: ${root}`);
+        return false;
+      }
+    });
+    if (!allowed) {
+      throw new Error(`workFolder is outside CLAUDE_CODE_MCP_ALLOWED_ROOTS: ${input}`);
+    }
+  }
+
+  return resolved;
 }
 
 /**
@@ -138,11 +212,10 @@ export function findClaudeCli(): string {
  */
 interface ClaudeCodeArgs {
   prompt: string;
-  workFolder?: string;
+  workFolder: string;
   sessionId?: string;
   messages?: ConversationMessage[];
   stateless?: boolean;
-  permissionMode?: ClaudePermissionMode;
 }
 
 interface ConversationMessage {
@@ -150,16 +223,11 @@ interface ConversationMessage {
   content: string;
 }
 
-const CLAUDE_PERMISSION_MODES = ['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan'] as const;
-type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
-
-function isClaudePermissionMode(value: unknown): value is ClaudePermissionMode {
-  return typeof value === 'string' && (CLAUDE_PERMISSION_MODES as readonly string[]).includes(value);
-}
-
 interface ClaudeCliResponse {
   type: string;
+  subtype?: string;
   result?: string;
+  is_error?: boolean;
   session_id?: string;
 }
 
@@ -369,50 +437,34 @@ export class ClaudeCodeServer {
       tools: [
         {
           name: 'claude_code',
-          description: `Claude Code Agent: Your versatile multi-modal assistant for code, file, Git, and terminal operations via Claude CLI. Use \`workFolder\` for contextual execution.
+          description: `Read-only code analysis of a repository via Claude Code. It can only inspect sources with Read, Grep and Glob: it cannot modify files, run commands, install packages or use the network.
 
-• File ops: Create, read, (fuzzy) edit, move, copy, delete, list files, analyze/ocr images, file content analysis
-    └─ e.g., "Create /tmp/log.txt with 'system boot'", "Edit main.py to replace 'debug_mode = True' with 'debug_mode = False'", "List files in /src", "Move a specific section somewhere else"
+• Understand the codebase
+    └─ "Explain the request pipeline of this project", "Which module owns billing?"
+• Locate code
+    └─ "Where is authentication implemented?", "Find every caller of getSession"
+• Review & diagnose
+    └─ "Why can this endpoint return 500?", "What are the risks of functions/retry.ts?"
+• Summarise behaviour
+    └─ "Describe the public API surface of src/api"
 
-• Code: Generate / analyse / refactor / fix
-    └─ e.g. "Generate Python to parse CSV→JSON", "Find bugs in my_script.py"
-
-• Git: Stage ▸ commit ▸ push ▸ tag (any workflow)
-    └─ "Commit '/workspace/src/main.java' with 'feat: user auth' to develop."
-
-• Terminal: Run any CLI cmd or open URLs
-    └─ "npm run build", "Open https://developer.mozilla.org"
-
-• Web search + summarise content on-the-fly
-
-• Multi-step workflows  (Version bumps, changelog updates, release tagging, etc.)
-
-• GitHub integration  Create PRs, check CI status
-
-• Confused or stuck on an issue? Ask Claude Code for a second opinion, it might surprise you!
-
-**Prompt tips**
-
-1. Be concise, explicit & step-by-step for complex tasks. No need for niceties, this is a tool to get things done.
-2. For multi-line text, write it to a temporary file in the project root, use that file, then delete it.
-3. If you get a timeout, split the task into smaller steps.
-4. **Seeking a second opinion/analysis**: If you're stuck or want advice, you can ask \`claude_code\` to analyze a problem and suggest solutions. Clearly state in your prompt that you are looking for analysis only and no actual file modifications should be made.
-5. If workFolder is set to the project path, there is no need to repeat that path in the prompt and you can use relative paths for files.
-6. Claude Code is really good at complex multi-step file operations and refactorings and faster than your native edit features.
-7. Combine file operations, README updates, and Git commands in a sequence.
-8. Claude can do much more, just ask it!
-
+**Tips**
+1. Always pass workFolder (absolute path); relative paths in the prompt resolve from it.
+2. Ask specific questions: answers cite file paths and line numbers.
+3. Large repositories: point at directories or files instead of "explain everything".
+4. Reuse sessionId for follow-up questions about the same repository.
+5. Requests that would need edits are answered with a proposal, never applied.
         `,
           inputSchema: {
             type: 'object',
             properties: {
               prompt: {
                 type: 'string',
-                description: 'The detailed natural language prompt for Claude to execute.',
+                description: 'The analysis question or instruction. Be specific; the answer cites file paths and line numbers.',
               },
               workFolder: {
                 type: 'string',
-                description: 'Mandatory when using file operations or referencing any file. The working directory for the Claude CLI execution. Must be an absolute path.',
+                description: 'Absolute path of the repository or directory to analyse. This is the only directory the model can read.',
               },
               sessionId: {
                 type: 'string',
@@ -440,14 +492,8 @@ export class ClaudeCodeServer {
                 description: 'Disable session continuity for this call.',
                 default: false,
               },
-              permissionMode: {
-                type: 'string',
-                enum: [...CLAUDE_PERMISSION_MODES],
-                description: 'Claude Code permission mode. Defaults to bypassPermissions for backwards compatibility; use default, acceptEdits, auto, dontAsk, or plan to avoid bypassing permission checks.',
-                default: 'bypassPermissions',
-              },
             },
-            required: ['prompt'],
+            required: ['prompt', 'workFolder'],
           },
         }
       ],
@@ -504,33 +550,23 @@ export class ClaudeCodeServer {
       }
 
       const stateless = toolArguments.stateless === true;
-      const permissionMode =
-        toolArguments.permissionMode === undefined ? 'bypassPermissions' : toolArguments.permissionMode;
-      if (!isClaudePermissionMode(permissionMode)) {
+
+      // 只读分析必须指定目标目录,避免默认扫描整个 home 目录。
+      if (typeof toolArguments.workFolder !== 'string' || toolArguments.workFolder.trim() === '') {
         throw new McpError(
           ErrorCode.InvalidParams,
-          `Invalid parameter: permissionMode must be one of ${CLAUDE_PERMISSION_MODES.join(', ')}.`
+          'Missing or invalid required parameter: workFolder (absolute path of the directory to analyse).'
         );
       }
 
-      // Determine the working directory
-      let effectiveCwd = homedir(); // Default CWD is user's home directory
-
-      // Check if workFolder is provided in the tool arguments
-      if (toolArguments.workFolder && typeof toolArguments.workFolder === 'string') {
-        const resolvedCwd = pathResolve(toolArguments.workFolder);
-        debugLog(`[Debug] Specified workFolder: ${toolArguments.workFolder}, Resolved to: ${resolvedCwd}`);
-
-        // Check if the resolved path exists
-        if (existsSync(resolvedCwd)) {
-          effectiveCwd = resolvedCwd;
-          debugLog(`[Debug] Using workFolder as CWD: ${effectiveCwd}`);
-        } else {
-          debugLog(`[Warning] Specified workFolder does not exist: ${resolvedCwd}. Using default: ${effectiveCwd}`);
-        }
-      } else {
-        debugLog(`[Debug] No workFolder provided, using default CWD: ${effectiveCwd}`);
+      let effectiveCwd: string;
+      try {
+        effectiveCwd = resolveWorkFolder(toolArguments.workFolder);
+      } catch (error: any) {
+        throw new McpError(ErrorCode.InvalidParams, error.message || String(error));
       }
+      const readOnlyTools = resolveReadOnlyTools();
+      debugLog(`[Debug] Analysing "${effectiveCwd}" with tools: ${readOnlyTools.join(',')}`);
 
       try {
         debugLog(`[Debug] Attempting to execute Claude CLI with prompt: "${prompt}" in CWD: "${effectiveCwd}"`);
@@ -543,15 +579,19 @@ export class ClaudeCodeServer {
         }
 
         let processedPrompt = translateSlashCommands(prompt);
-        const claudeProcessArgs =
-          permissionMode === 'bypassPermissions'
-            ? ['--dangerously-skip-permissions']
-            : ['--permission-mode', permissionMode];
+        const claudeProcessArgs = [
+          // 只暴露只读工具;--restricted 额外移除代码执行能力、忽略本地 settings,
+          // 并把文件工具限制在 CWD 之内;--strict-mcp-config 避免加载外部 MCP 服务器。
+          '--tools', readOnlyTools.join(','),
+          '--restricted',
+          '--strict-mcp-config',
+          '--append-system-prompt', READ_ONLY_SYSTEM_PROMPT,
+          '--output-format', 'json',
+        ];
         const useSessionContinuity = !stateless && typeof sessionId === 'string' && sessionId.length > 0;
 
         if (useSessionContinuity) {
           const existingClaudeSessionId = getSessionMapping(sessionId);
-          claudeProcessArgs.push('--output-format', 'json');
           if (existingClaudeSessionId) {
             claudeProcessArgs.push('--resume', existingClaudeSessionId);
           } else if (Array.isArray(messages) && messages.length > 0) {
@@ -575,29 +615,33 @@ export class ClaudeCodeServer {
           debugLog('[Debug] Claude CLI stderr:', stderr.trim());
         }
 
-        if (!useSessionContinuity) {
-          // Return stdout content, even if there was stderr, as claude-cli might output main result to stdout.
+        const parsedResponse = parseClaudeResponse(stdout);
+        if (!parsedResponse) {
+          // JSON 输出意外不可解析时退回原始 stdout,至少不丢结果。
           return { content: [{ type: 'text', text: stdout }] };
         }
 
-        const parsedResponse = parseClaudeResponse(stdout);
-        if (!parsedResponse) {
-          return { content: [{ type: 'text', text: stdout }] };
+        if (parsedResponse.is_error) {
+          throw new McpError(ErrorCode.InternalError, parsedResponse.result || 'Claude CLI reported an error.');
         }
 
         const resultText = parsedResponse.result ?? '';
         const claudeSessionId = parsedResponse.session_id;
-        if (claudeSessionId) {
+        if (useSessionContinuity && claudeSessionId) {
           setSessionMapping(sessionId, claudeSessionId);
         }
 
         const content: { type: 'text'; text: string }[] = [{ type: 'text', text: resultText }];
-        if (claudeSessionId) {
+        // 只有续聊调用才回传 session id,避免污染一次性查询的答案。
+        if (useSessionContinuity && claudeSessionId) {
           content.push({ type: 'text', text: `\n---\n_Session ID: ${claudeSessionId}_` });
         }
         return { content };
 
       } catch (error: any) {
+        if (error instanceof McpError) {
+          throw error;
+        }
         debugLog('[Error] Error executing Claude CLI:', error);
         let errorMessage = error.message || 'Unknown error';
         // Attempt to include stderr and stdout from the error object if spawnAsync attached them

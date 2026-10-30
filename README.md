@@ -1,298 +1,114 @@
-# Claude Code MCP Server
+# Claude Code MCP Server (read-only code analysis)
+
+An MCP (Model Context Protocol) server that wraps the local Claude Code CLI as a **read-only code analysis** tool: the caller sends a question plus a directory, and gets an analysis back. It cannot modify files, run commands, install packages or access the network.
+
+This is a fork of [@steipete/claude-code-mcp](https://github.com/steipete/claude-code-mcp) that replaces the original "bypass all permissions" behaviour with a hard read-only mode, which makes the tool safe to expose to other agents or workflow engines (Dify, n8n, LangGraph, another coding agent, ...).
 
 <img src="assets/claude_code_mcp_logo.png" alt="Claude Code MCP Logo">
 
-[![npm package](https://img.shields.io/npm/v/@steipete/claude-code-mcp)](https://www.npmjs.com/package/@steipete/claude-code-mcp)
-[![View changelog](https://img.shields.io/badge/Explore%20Changelog-brightgreen)](/CHANGELOG.md)
+## How read-only is enforced
 
-An MCP (Model Context Protocol) server that allows running Claude Code in one-shot mode, with bypassed permissions by default and optional native Claude Code permission modes.
+Every invocation starts the Claude Code CLI with a fixed set of flags. The caller cannot override them:
 
-Did you notice that Cursor sometimes struggles with complex, multi-step edits or operations? This server, with its powerful unified `claude_code` tool, aims to make Claude a more direct and capable agent for your coding tasks.
+| Flag | Effect |
+| --- | --- |
+| `--tools Read,Grep,Glob` | The model only ever sees these three built-in tools. No `Edit`, `Write`, `Bash`, `WebFetch` or sub-agents. |
+| `--restricted` | Removes code-running tools, ignores user/project settings, confines file tools to the working directory and refuses `bypassPermissions`. |
+| `--strict-mcp-config` | Skips MCP servers configured on the machine, so no side channel to file writes or the network. |
+| `--append-system-prompt` | Adds an explicit read-only instruction to the system prompt. |
+| `--output-format json` | Returns only the final answer (errors are surfaced as MCP errors). |
 
-<img src="assets/screenshot.png" width="300" alt="Screenshot">
+`workFolder` is required, must be an absolute path and is resolved through `realpathSync` before use. This is not an OS-level sandbox, but every tool-level path to a write, shell command or network call is closed.
 
-## Overview
+## Environment variables
 
-This MCP server provides one tool that can be used by LLMs to interact with Claude Code. When integrated with Claude Desktop or other MCP clients, it allows LLMs to:
+- `CLAUDE_CLI_PATH`: Absolute path to the Claude CLI executable.
+- `CLAUDE_CLI_NAME`: CLI binary name or absolute path (default: `claude`).
+- `CLAUDE_CLI_TIMEOUT_SECONDS`: Per-call timeout in seconds (default: `3600`).
+- `CLAUDE_CODE_MCP_TOOLS`: Restrict the tool whitelist further, e.g. `Read,Grep`. Values outside `Read,Grep,Glob` are ignored.
+- `CLAUDE_CODE_MCP_ALLOWED_ROOTS`: Colon-separated directories that `workFolder` must live under. Unset means any existing directory is allowed.
+- `MCP_CLAUDE_DEBUG`: Set to `true` for verbose logging on stderr.
 
-- Run Claude Code with all permissions bypassed by default (using `--dangerously-skip-permissions`)
-- Execute Claude Code with a native permission mode when requested
-- Access file editing capabilities directly
-- Enable specific tools by default
+## Requirements
 
-## Permissions and Alternatives
-
-This server is a thin MCP wrapper around the local Claude Code CLI. By default it preserves the historic behavior and starts Claude Code with `--dangerously-skip-permissions`. Set the tool's `permissionMode` argument to `default`, `acceptEdits`, `auto`, `dontAsk`, or `plan` when you want Claude Code's native permission checks instead. This wrapper is not an OS-level sandbox; for a hard file-system boundary, run the MCP server or Claude CLI inside your own container, VM, or platform sandbox.
-
-The wrapper cannot approve prompts that belong to a parent MCP client, bypass macOS privacy prompts, or make another Claude Code session inherit its settings. If the calling client stalls while waiting for permission checks, fix the caller's MCP permissions or run Claude Code directly instead.
-
-Current alternatives:
-- Use Claude Code directly for work that needs its native permission UI: `claude`, `claude -p`, or `claude --permission-mode default`.
-- Use Claude Code's native MCP server when another MCP client should access Claude Code tools: `claude mcp serve`.
-- For Claude Code as the caller, configure tool permissions with `--allowedTools`, `--disallowedTools`, project/user settings, or `--permission-prompt-tool`.
-
-Use this package when you specifically want one MCP tool that delegates a prompt to a separate Claude Code process. Prefer native Claude Code MCP/permission configuration when permission ownership needs to stay with the active Claude Code session.
-
-## Benefits
-
-- Cursor/Windsurf often have trouble editing files. Claude Code is better and faster at it.
-- Multiple commands can be queued instead of direct execution. This saves context space so more important stuff is retained longer, fewer compacts happen.
-- File ops, git, or other operations don't need costy models. Claude Code is pretty cost effective if you sign up for Antropic Max. You can use Gemini or o3 in Max mode and save costs with offloading tasks to cheaper models.
-- Claude has wider system access and can do things that Cursor/Windsurf can't do (or believe they can't), so whenever they are stuck just ask them "use claude code" and it will usually un-stuck them.
-- Agents in Agents rules.
-
-<img src="assets/agents_in_agents_meme.jpg" alt="Agents in Agents Meme">
-
-## Prerequisites
-
-- Node.js v20 or later (Use fnm or nvm to install)
-- Claude CLI installed locally (run it and call /doctor). For the default mode, accept `--dangerously-skip-permissions` once.
-
-## Configuration
-
-### Environment Variables
-
-- `CLAUDE_CLI_NAME`: Override the Claude CLI binary name or provide an absolute path (default: `claude`). This allows you to use a custom Claude CLI binary. This is useful for:
-  - Using custom Claude CLI wrappers
-  - Testing with mocked binaries
-  - Running multiple Claude CLI versions side by side
-  
-  Supported formats:
-  - Simple name: `CLAUDE_CLI_NAME=claude-custom` or `CLAUDE_CLI_NAME=claude-v2`
-  - Absolute path: `CLAUDE_CLI_NAME=/path/to/custom/claude`
-  
-  Relative paths (e.g., `./claude` or `../claude`) are not allowed and will throw an error.
-  
-  When set to a simple name, the server will look for the specified binary in:
-  1. The system PATH (instead of the default `claude` command)
-  
-  Note: The local user installation path (`~/.claude/local/claude`) will still be checked but only for the default `claude` binary.
-
-- `MCP_CLAUDE_DEBUG`: Enable debug logging (set to `true` for verbose output)
-- `CLAUDE_CLI_TIMEOUT_SECONDS`: Override the Claude CLI execution timeout in seconds (default: `3600`)
-
-## Installation & Usage
-
-The recommended way to use this server is by installing it by using `npx`.
-
-```json
-    "claude-code-mcp": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@steipete/claude-code-mcp@latest"
-      ]
-    },
-```
-
-To use a custom Claude CLI binary name, you can specify the environment variable:
-
-```json
-    "claude-code-mcp": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@steipete/claude-code-mcp@latest"
-      ],
-      "env": {
-        "CLAUDE_CLI_NAME": "claude-custom"
-      }
-    },
-```
-
-## Important First-Time Setup: Accepting Permissions
-
-**Before the MCP server can use the default `bypassPermissions` mode, you must first run the Claude CLI manually once with the `--dangerously-skip-permissions` flag, login and accept the terms.**
-
-This is a one-time requirement by the Claude CLI.
+- Node.js v22 or later (Claude Code 2.x requires it).
+- Claude Code CLI installed locally. A DeepSeek (or Anthropic-compatible) endpoint works too:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
+# .env used by start.sh
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-...
+ANTHROPIC_MODEL=deepseek-flash[1m]
+CLAUDE_CLI_PATH=./node_modules/.bin/claude
+NODE_BIN_DIR=/path/to/node/bin
 ```
-```bash
-claude --dangerously-skip-permissions
-```
 
-Follow the prompts to accept. Once this is done, the MCP server will be able to use the flag non-interactively.
+## Installation & MCP client configuration
 
-macOS might ask for all kind of folder permissions the first time the tool runs and the first run then fails. Subsequent runs will work.
-
-## Connecting to Your MCP Client
-
-After setting up the server, you need to configure your MCP client (like Cursor or others that use `mcp.json` or `mcp_config.json`).
-
-### MCP Configuration File
-
-The configuration is typically done in a JSON file. The name and location can vary depending on your client.
-
-#### Cursor
-
-Cursor uses `mcp.json`.
-- **macOS:** `~/.cursor/mcp.json`
-- **Windows:** `%APPDATA%\\Cursor\\mcp.json`
-- **Linux:** `~/.config/cursor/mcp.json`
-
-#### Windsurf
-
-Windsurf users use `mcp_config.json`
-- **macOS:** `~/.codeium/windsurf/mcp_config.json`
-- **Windows:** `%APPDATA%\\Codeium\\windsurf\\mcp_config.json`
-- **Linux:** `~/.config/.codeium/windsurf/mcp_config.json`
-
-(Note: In some mixed setups, if Cursor is also installed, these clients might fall back to using Cursor's `~/.cursor/mcp.json` path. Prioritize the Codeium-specific paths if using the Codeium extension.)
-
-Create this file if it doesn't exist. Add or update the configuration for `claude_code`:
-
-## Tools Provided
-
-This server exposes one primary tool:
-
-### `claude_code`
-
-Executes a prompt directly using the Claude Code CLI. Defaults to bypassed permissions for backwards compatibility; pass `permissionMode` to use Claude Code's native permission modes.
-
-**Arguments:**
-- `prompt` (string, required): The prompt to send to Claude Code.
-- `workFolder` (string, optional): Absolute working directory for file operations.
-- `sessionId` (string, optional): Parent session ID. Repeated calls with the same ID resume the same Claude Code session.
-- `messages` (array, optional): Conversation history to inject on the first call for a session.
-- `stateless` (boolean, optional): Disable session continuity for this call.
-- `permissionMode` (string, optional): Claude Code permission mode. Defaults to `bypassPermissions` for backwards compatibility; use `default`, `acceptEdits`, `auto`, `dontAsk`, or `plan` to avoid bypassing permission checks.
-
-**Example MCP Request:**
 ```json
 {
-  "toolName": "claude_code:claude_code",
-  "arguments": {
-    "prompt": "Refactor the function foo in main.py to be async."
+  "mcpServers": {
+    "claude-code": {
+      "command": "/path/to/claude-code-mcp/start.sh",
+      "env": {
+        "CLAUDE_CODE_MCP_ALLOWED_ROOTS": "/Users/me/projects"
+      }
+    }
   }
 }
 ```
 
-### Examples
+`start.sh` loads the local `.env`, puts the configured Node runtime on `PATH` and runs `dist/server.js`.
 
-Here are some visual examples of the server in action:
+## Tool: `claude_code`
 
-<img src="assets/claude_tool_git_example.png" alt="Claude Tool Git Example" width="50%">
+Runs a read-only analysis of `workFolder` through Claude Code.
 
-<img src="assets/additional_claude_screenshot.png" alt="Additional Claude Screenshot" width="50%">
+**Arguments:**
 
-<img src="assets/cursor-screenshot.png" alt="Cursor Screenshot" width="50%">
+- `prompt` (string, required): The analysis question or instruction.
+- `workFolder` (string, required): Absolute path of the repository/directory to analyse. This is the only directory the model can read.
+- `sessionId` (string, optional): Parent session ID; repeated calls with the same ID resume the same Claude Code session.
+- `messages` (array, optional): Conversation history to inject on the first call of a session.
+- `stateless` (boolean, optional): Disable session continuity for this call.
 
-### Fixing ESLint Setup
+**Example request:**
 
-Here's an example of using the Claude Code MCP tool to interactively fix an ESLint setup by deleting old configuration files and creating a new one:
+```json
+{
+  "toolName": "claude_code:claude_code",
+  "arguments": {
+    "prompt": "Explain the request pipeline and point out where retries are implemented.",
+    "workFolder": "/Users/me/projects/api"
+  }
+}
+```
 
-<img src="assets/eslint_example.png" alt="ESLint file operations example" width="50%">
+**Typical questions:**
 
-### Listing Files Example
-
-Here's an example of the Claude Code tool listing files in a directory:
-
-<img src="assets/file_list_example.png" alt="File listing example" width="50%">
-
-## Key Use Cases
-
-This server, through its unified `claude_code` tool, unlocks a wide range of powerful capabilities by giving your AI direct access to the Claude Code CLI. Here are some examples of what you can achieve:
-
-1.  **Code Generation, Analysis & Refactoring:**
-    -   `"Generate a Python script to parse CSV data and output JSON."`
-    -   `"Analyze my_script.py for potential bugs and suggest improvements."`
-
-2.  **File System Operations (Create, Read, Edit, Manage):**
-    -   **Creating Files:** `"Your work folder is /Users/steipete/my_project\n\nCreate a new file named 'config.yml' in the 'app/settings' directory with the following content:\nport: 8080\ndatabase: main_db"`
-    -   **Editing Files:** `"Your work folder is /Users/steipete/my_project\n\nEdit file 'public/css/style.css': Add a new CSS rule at the end to make all 'h2' elements have a 'color: navy'."`
-    -   **Moving/Copying/Deleting:** `"Your work folder is /Users/steipete/my_project\n\nMove the file 'report.docx' from the 'drafts' folder to the 'final_reports' folder and rename it to 'Q1_Report_Final.docx'."`
-
-3.  **Version Control (Git):**
-    -   `"Your work folder is /Users/steipete/my_project\n\n1. Stage the file 'src/main.java'.\n2. Commit the changes with the message 'feat: Implement user authentication'.\n3. Push the commit to the 'develop' branch on origin."`
-
-4.  **Running Terminal Commands:**
-    -   `"Your work folder is /Users/steipete/my_project/frontend\n\nRun the command 'npm run build'."`
-    -   `"Open the URL https://developer.mozilla.org in my default web browser."`
-
-5.  **Web Search & Summarization:**
-    -   `"Search the web for 'benefits of server-side rendering' and provide a concise summary."`
-
-6.  **Complex Multi-Step Workflows:**
-    -   Automate version bumps, update changelogs, and tag releases: `"Your work folder is /Users/steipete/my_project\n\nFollow these steps: 1. Update the version in package.json to 2.5.0. 2. Add a new section to CHANGELOG.md for version 2.5.0 with the heading '### Added' and list 'New feature X'. 3. Stage package.json and CHANGELOG.md. 4. Commit with message 'release: version 2.5.0'. 5. Push the commit. 6. Create and push a git tag v2.5.0."`
-
-    <img src="assets/multistep_example.png" alt="Complex multi-step operation example" width="50%">
-
-7.  **Repairing Files with Syntax Errors:**
-    -   `"Your work folder is /path/to/project\n\nThe file 'src/utils/parser.js' has syntax errors after a recent complex edit that broke its structure. Please analyze it, identify the syntax errors, and correct the file to make it valid JavaScript again, ensuring the original logic is preserved as much as possible."`
-
-8.  **Interacting with GitHub (e.g., Creating a Pull Request):**
-    -   `"Your work folder is /Users/steipete/my_project\n\nCreate a GitHub Pull Request in the repository 'owner/repo' from the 'feature-branch' to the 'main' branch. Title: 'feat: Implement new login flow'. Body: 'This PR adds a new and improved login experience for users.'"`
-
-9.  **Interacting with GitHub (e.g., Checking PR CI Status):**
-    -   `"Your work folder is /Users/steipete/my_project\n\nCheck the status of CI checks for Pull Request #42 in the GitHub repository 'owner/repo'. Report if they have passed, failed, or are still running."`
-
-### Correcting GitHub Actions Workflow
-
-<img src="assets/github_actions_fix_example.png" alt="GitHub Actions workflow fix example" width="50%">
-
-### Complex Multi-Step Operations
-
-This example illustrates `claude_code` handling a more complex, multi-step task, such as preparing a release by creating a branch, updating multiple files (`package.json`, `CHANGELOG.md`), committing changes, and initiating a pull request, all within a single, coherent operation.
-
-<img src="assets/claude_code_multistep_example.png" alt="Claude Code multi-step example" width="50%">
-
-**CRITICAL: Remember to provide Current Working Directory (CWD) context in your prompts for file system or git operations (e.g., `"Your work folder is /path/to/project\n\n...your command..."`).**
+- "Summarise the architecture of this repository in 10 bullet points."
+- "Where is authentication implemented? List the files and entry points."
+- "Which callers depend on `getSession`?"
+- "Why can `POST /orders` return 500? Trace the error path."
+- "Describe the public API surface of `src/api`."
 
 ## Troubleshooting
 
-- **"Command not found" (claude-code-mcp):** If installed globally, ensure the npm global bin directory is in your system's PATH. If using `npx`, ensure `npx` itself is working.
-- **"Command not found" (claude or ~/.claude/local/claude):** Ensure the Claude CLI is installed correctly. Run `claude/doctor` or check its documentation.
-- **Permissions Issues:** Make sure you've run the "Important First-Time Setup" step. If the parent MCP client is waiting on its own approval flow, configure that client's MCP permissions or use Claude Code's native `claude mcp serve` path; this server can only pass flags to the child Claude Code process it starts.
-- **JSON Errors from Server:** If `MCP_CLAUDE_DEBUG` is `true`, error messages or logs might interfere with MCP's JSON parsing. Set to `false` for normal operation.
-- **ESM/Import Errors:** Ensure you are using Node.js v20 or later.
+- **`workFolder does not exist` / `must be an absolute path`**: pass an absolute path to an existing directory, and make sure it is inside `CLAUDE_CODE_MCP_ALLOWED_ROOTS` when that variable is set.
+- **`Claude CLI not found`**: set `CLAUDE_CLI_PATH` to the binary (for a local install: `node_modules/.bin/claude`).
+- **`Claude CLI command timed out`**: split the question into smaller ones or raise `CLAUDE_CLI_TIMEOUT_SECONDS`.
+- **DeepSeek / third-party endpoints**: set `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`; a local proxy is needed on some networks (`HTTPS_PROXY`).
 
-**For Developers: Local Setup & Contribution**
-
-If you want to develop or contribute to this server, or run it from a cloned repository for testing, please see our [Local Installation & Development Setup Guide](./docs/local_install.md).
-
-## Testing
-
-The project includes comprehensive test suites:
+## Development
 
 ```bash
-# Run all tests
-npm test
-
-# Run unit tests only
-npm run test:unit
-
-# Run e2e tests (with mocks)
-npm run test:e2e
-
-# Run e2e tests locally (requires Claude CLI)
-npm run test:e2e:local
-
-# Watch mode for development
-npm run test:watch
-
-# Coverage report
-npm run test:coverage
+npm ci
+npm run build      # tsc -> dist/
+npm run test:unit  # unit tests (no network)
+npm run test:e2e   # e2e tests with a mock CLI
 ```
 
-For detailed testing documentation, see our [E2E Testing Guide](./docs/e2e-testing.md).
-
-## Configuration via Environment Variables
-
-The server's behavior can be customized using these environment variables:
-
-- `CLAUDE_CLI_PATH`: Absolute path to the Claude CLI executable.
-  - Default: Checks `~/.claude/local/claude`, then falls back to `claude` (expecting it in PATH).
-- `MCP_CLAUDE_DEBUG`: Set to `true` for verbose debug logging from this MCP server. Default: `false`.
-
-These can be set in your shell environment or within the `env` block of your `mcp.json` server configuration (though the `env` block in `mcp.json` examples was removed for simplicity, it's still a valid way to set them for the server process if needed).
-
-## Contributing
-
-Contributions are welcome! Please refer to the [Local Installation & Development Setup Guide](./docs/local_install.md) for details on setting up your environment.
-
-Submit issues and pull requests to the [GitHub repository](https://github.com/steipete/claude-code-mcp).
+Source lives in `src/server.ts`; the tool schema and the read-only flags are defined in the `setupToolHandlers` method.
 
 ## License
 

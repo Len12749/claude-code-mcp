@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
@@ -37,6 +37,8 @@ vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
 const mockExistsSync = vi.mocked(existsSync);
 const mockSpawn = vi.mocked(spawn);
 const mockHomedir = vi.mocked(homedir);
+const mockRealpathSync = vi.mocked(realpathSync);
+const mockStatSync = vi.mocked(statSync);
 
 // Helper to setup Server mock with proper handlers
 function setupServerMock() {
@@ -84,6 +86,9 @@ describe('Error Handling Tests', () => {
     process.env = { ...originalEnv };
     delete process.env.CLAUDE_CLI_NAME;
     delete process.env.MCP_CLAUDE_DEBUG;
+    // workFolder 校验会解析真实路径,这里给出稳定的替身实现
+    mockRealpathSync.mockImplementation(((value: string) => String(value)) as any);
+    mockStatSync.mockReturnValue({ isDirectory: () => true } as any);
   });
 
   afterEach(() => {

@@ -43,17 +43,17 @@ describe('Claude Code MCP E2E Tests', () => {
       expect(tools).toHaveLength(1);
       expect(tools[0]).toEqual({
         name: 'claude_code',
-        description: expect.stringContaining('Claude Code Agent'),
+        description: expect.stringContaining('Read-only code analysis'),
         inputSchema: expect.objectContaining({
           type: 'object',
           properties: expect.objectContaining({
             prompt: {
               type: 'string',
-              description: 'The detailed natural language prompt for Claude to execute.',
+              description: expect.stringContaining('analysis question'),
             },
             workFolder: {
               type: 'string',
-              description: expect.stringContaining('working directory'),
+              description: expect.stringContaining('only directory'),
             },
             sessionId: expect.objectContaining({
               type: 'string',
@@ -64,21 +64,17 @@ describe('Claude Code MCP E2E Tests', () => {
             stateless: expect.objectContaining({
               type: 'boolean',
             }),
-            permissionMode: expect.objectContaining({
-              type: 'string',
-              enum: expect.arrayContaining(['bypassPermissions', 'default', 'plan']),
-            }),
           }),
-          required: ['prompt'],
+          required: ['prompt', 'workFolder'],
         }),
       });
     });
   });
 
   describe('Basic Operations', () => {
-    it('should execute a simple prompt', async () => {
+    it('should run a read-only analysis prompt', async () => {
       const response = await client.callTool('claude_code', {
-        prompt: 'create a file called test.txt with content "Hello World"',
+        prompt: 'explain the directory layout',
         workFolder: testDir,
       });
 
@@ -98,12 +94,12 @@ describe('Claude Code MCP E2E Tests', () => {
       ).rejects.toThrow();
     });
 
-    it('should use default working directory when not specified', async () => {
-      const response = await client.callTool('claude_code', {
-        prompt: 'List files in current directory',
-      });
-
-      expect(response).toBeTruthy();
+    it('should reject calls without workFolder', async () => {
+      await expect(
+        client.callTool('claude_code', {
+          prompt: 'List files in current directory',
+        })
+      ).rejects.toThrow(/workFolder/);
     });
   });
 
@@ -117,15 +113,15 @@ describe('Claude Code MCP E2E Tests', () => {
       expect(response).toBeTruthy();
     });
 
-    it('should use default directory for non-existent working directory', async () => {
+    it('should reject a non-existent working directory', async () => {
       const nonExistentDir = join(testDir, 'non-existent');
-      
-      const response = await client.callTool('claude_code', {
-        prompt: 'Test prompt',
-        workFolder: nonExistentDir,
-      });
-      
-      expect(response).toBeTruthy();
+
+      await expect(
+        client.callTool('claude_code', {
+          prompt: 'Test prompt',
+          workFolder: nonExistentDir,
+        })
+      ).rejects.toThrow(/does not exist/);
     });
   });
 
@@ -171,29 +167,27 @@ describe('Integration Tests (Local Only)', () => {
   });
 
   // These tests will only run locally when Claude is available
-  it.skip('should create a file with real Claude CLI', async () => {
+  it.skip('should analyse a file with real Claude CLI', async () => {
     await client.connect();
-    
+
     const response = await client.callTool('claude_code', {
-      prompt: 'Create a file called hello.txt with content "Hello from Claude"',
-      workFolder: testDir,
+      prompt: 'Summarise package.json',
+      workFolder: process.cwd(),
     });
 
-    const filePath = join(testDir, 'hello.txt');
-    expect(existsSync(filePath)).toBe(true);
-    expect(readFileSync(filePath, 'utf-8')).toContain('Hello from Claude');
+    expect(JSON.stringify(response)).toContain('name');
   });
 
-  it.skip('should handle git operations with real Claude CLI', async () => {
+  it.skip('should refuse to modify files with real Claude CLI', async () => {
     await client.connect();
-    
-    // Initialize git repo
-    const response = await client.callTool('claude_code', {
-      prompt: 'Initialize a git repository and create a README.md file',
+
+    const filePath = join(testDir, 'hello.txt');
+    await client.callTool('claude_code', {
+      prompt: `Create ${filePath} with content "Hello from Claude"`,
       workFolder: testDir,
     });
 
-    expect(existsSync(join(testDir, '.git'))).toBe(true);
-    expect(existsSync(join(testDir, 'README.md'))).toBe(true);
+    // 只读模式:CLI 没有写文件工具,文件不应被创建
+    expect(existsSync(filePath)).toBe(false);
   });
 });

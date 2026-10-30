@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Purpose
 
-This is the source code for the Claude Code MCP tool - a server that allows running Claude Code in one-shot mode with permissions bypassed automatically. When you're asked to edit the Claude Code tool description or behavior, update it in `src/server.ts`.
+This is the source code for the Claude Code MCP tool - a server that exposes Claude Code as a read-only code analysis tool (it can only inspect files, never modify them or run commands). When you're asked to edit the Claude Code tool description or behavior, update it in `src/server.ts`.
 
 ## Key Files
 
@@ -34,7 +34,7 @@ The tool description can be found in `src/server.ts`. When asked to update the C
 
 ## Architecture Notes
 
-- This MCP server provides a single tool (`claude_code`) that executes Claude CLI with bypassed permissions
+- This MCP server provides a single tool (`claude_code`) that executes Claude CLI in enforced read-only mode (`--tools Read,Grep,Glob --restricted --strict-mcp-config`)
 - The server handles execution via the `spawnAsync` function that runs Claude CLI with appropriate parameters
 - Error handling and timeout management are implemented for reliability
 - Working directory can be specified via the `workFolder` parameter

@@ -1,7 +1,7 @@
 {
   "name": "@steipete/claude-code-mcp",
   "version": "1.10.12",
-  "description": "Simple MCP server for Claude Code one-shot execution",
+  "description": "Read-only code analysis MCP server built on Claude Code",
   "author": "Peter Steinberger",
   "license": "MIT",
   "main": "dist/server.js",
@@ -20,6 +20,7 @@
     "test:watch": "vitest --watch"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.314",
     "@modelcontextprotocol/sdk": "^1.11.2",
     "zod": "^3.24.4"
   },
