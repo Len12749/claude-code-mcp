@@ -98,23 +98,29 @@ export function resolveReadOnlyTools(envValue = process.env.CLAUDE_CODE_MCP_TOOL
 }
 
 /**
- * 校验并规范化 workFolder:必须是已存在的目录(解析符号链接后再判断)。
+ * 校验并规范化 workFolder。省略时回落到 CLAUDE_CODE_MCP_DEFAULT_ROOT,
+ * 各机器只需在 .env 里配置仓库路径,调用方不必知道绝对路径。
  * 若设置了 CLAUDE_CODE_MCP_ALLOWED_ROOTS(冒号分隔),目录必须落在其中之一。
  */
-export function resolveWorkFolder(input: string): string {
-  if (!path.isAbsolute(input)) {
-    throw new Error(`workFolder must be an absolute path: ${input}`);
+export function resolveWorkFolder(input?: string): string {
+  const raw = input?.trim() || process.env.CLAUDE_CODE_MCP_DEFAULT_ROOT?.trim();
+  if (!raw) {
+    throw new Error('workFolder is required (or set CLAUDE_CODE_MCP_DEFAULT_ROOT on the MCP server).');
+  }
+
+  if (!path.isAbsolute(raw)) {
+    throw new Error(`workFolder must be an absolute path: ${raw}`);
   }
 
   let resolved: string;
   try {
-    resolved = realpathSync(input);
+    resolved = realpathSync(raw);
   } catch {
-    throw new Error(`workFolder does not exist: ${input}`);
+    throw new Error(`workFolder does not exist: ${raw}`);
   }
 
   if (!statSync(resolved).isDirectory()) {
-    throw new Error(`workFolder is not a directory: ${input}`);
+    throw new Error(`workFolder is not a directory: ${raw}`);
   }
 
   const roots = (process.env.CLAUDE_CODE_MCP_ALLOWED_ROOTS ?? '')
@@ -132,7 +138,7 @@ export function resolveWorkFolder(input: string): string {
       }
     });
     if (!allowed) {
-      throw new Error(`workFolder is outside CLAUDE_CODE_MCP_ALLOWED_ROOTS: ${input}`);
+      throw new Error(`workFolder is outside CLAUDE_CODE_MCP_ALLOWED_ROOTS: ${raw}`);
     }
   }
 
@@ -222,7 +228,7 @@ export function findClaudeCli(): string {
  */
 interface ClaudeCodeArgs {
   prompt: string;
-  workFolder: string;
+  workFolder?: string;
   sessionId?: string;
   messages?: ConversationMessage[];
   stateless?: boolean;
@@ -459,7 +465,7 @@ export class ClaudeCodeServer {
     └─ "Describe the public API surface of src/api"
 
 **Tips**
-1. Always pass workFolder (absolute path); relative paths in the prompt resolve from it.
+1. workFolder may be omitted: the server defaults to the repository it is configured for. Pass it only to analyse another allowed directory; relative paths resolve from it.
 2. Ask specific questions: answers cite file paths and line numbers.
 3. Large repositories: point at directories or files instead of "explain everything".
 4. Reuse sessionId for follow-up questions about the same repository.
@@ -474,7 +480,7 @@ export class ClaudeCodeServer {
               },
               workFolder: {
                 type: 'string',
-                description: 'Absolute path of the repository or directory to analyse. This is the only directory the model can read.',
+                description: 'Optional absolute path of the directory to analyse. Omit it to use the repository configured on the server (the normal case); a supplied path must live under the server allow-list.',
               },
               sessionId: {
                 type: 'string',
@@ -503,7 +509,7 @@ export class ClaudeCodeServer {
                 default: false,
               },
             },
-            required: ['prompt', 'workFolder'],
+            required: ['prompt'],
           },
         }
       ],
@@ -561,17 +567,16 @@ export class ClaudeCodeServer {
 
       const stateless = toolArguments.stateless === true;
 
-      // 只读分析必须指定目标目录,避免默认扫描整个 home 目录。
-      if (typeof toolArguments.workFolder !== 'string' || toolArguments.workFolder.trim() === '') {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          'Missing or invalid required parameter: workFolder (absolute path of the directory to analyse).'
-        );
+      // 目标目录:调用方可省略,服务端回落到 CLAUDE_CODE_MCP_DEFAULT_ROOT,
+      // 避免把本机路径写进提示词,也避免默认扫描整个 home。
+      const workFolderInput = typeof toolArguments.workFolder === 'string' ? toolArguments.workFolder : undefined;
+      if (workFolderInput !== undefined && (typeof toolArguments.workFolder !== 'string' || workFolderInput.trim() === '')) {
+        throw new McpError(ErrorCode.InvalidParams, 'Invalid parameter: workFolder must be a non-empty absolute path.');
       }
 
       let effectiveCwd: string;
       try {
-        effectiveCwd = resolveWorkFolder(toolArguments.workFolder);
+        effectiveCwd = resolveWorkFolder(workFolderInput);
       } catch (error: any) {
         throw new McpError(ErrorCode.InvalidParams, error.message || String(error));
       }

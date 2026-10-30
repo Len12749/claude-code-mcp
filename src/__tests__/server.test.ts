@@ -489,7 +489,7 @@ describe('ClaudeCodeServer Unit Tests', () => {
       expect(result.tools).toHaveLength(1);
       expect(result.tools[0].name).toBe('claude_code');
       expect(result.tools[0].description).toContain('Read-only code analysis');
-      expect(result.tools[0].inputSchema.required).toEqual(['prompt', 'workFolder']);
+      expect(result.tools[0].inputSchema.required).toEqual(['prompt']);
       expect(result.tools[0].inputSchema.properties).not.toHaveProperty('permissionMode');
     });
 
@@ -590,7 +590,41 @@ describe('ClaudeCodeServer Unit Tests', () => {
       expect(spawnArgs).not.toContain('--permission-mode');
     });
 
-    it('should require an absolute workFolder', async () => {
+    it('should fall back to CLAUDE_CODE_MCP_DEFAULT_ROOT when workFolder is omitted', async () => {
+      process.env.CLAUDE_CODE_MCP_DEFAULT_ROOT = '/srv/kjlm-web';
+      mockHomedir.mockReturnValue('/home/user');
+      mockExistsSync.mockReturnValue(true);
+
+      const module = await import('../server.js');
+      const { ClaudeCodeServer } = module;
+
+      const server = new ClaudeCodeServer();
+      const mockServerInstance = vi.mocked(Server).mock.results[0].value;
+      const callToolCall = mockServerInstance.setRequestHandler.mock.calls.find(
+        (call: any[]) => call[0].name === 'callTool'
+      );
+
+      const handler = callToolCall[1];
+      const mockProcess = createMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const promise = handler({
+        params: {
+          name: 'claude_code',
+          arguments: { prompt: 'test prompt' }
+        }
+      });
+      setTimeout(() => {
+        mockProcess.stdout['data']('tool output');
+        mockProcess.emit('close', 0);
+      }, 10);
+
+      await promise;
+      expect(mockSpawn.mock.calls[0][2]).toMatchObject({ cwd: '/srv/kjlm-web' });
+    });
+
+    it('should reject a relative workFolder even with a default root configured', async () => {
+      process.env.CLAUDE_CODE_MCP_DEFAULT_ROOT = '/srv/kjlm-web';
       mockHomedir.mockReturnValue('/home/user');
       mockExistsSync.mockReturnValue(true);
 
@@ -610,10 +644,10 @@ describe('ClaudeCodeServer Unit Tests', () => {
         handler({
           params: {
             name: 'claude_code',
-            arguments: { prompt: 'test prompt' }
+            arguments: { prompt: 'test prompt', workFolder: 'relative/dir' }
           }
         })
-      ).rejects.toThrow(/workFolder/);
+      ).rejects.toThrow(/absolute/);
       expect(mockSpawn.mock.calls).toHaveLength(spawnCallsBefore);
     });
 

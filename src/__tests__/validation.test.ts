@@ -90,14 +90,14 @@ describe('Argument Validation Tests', () => {
       // Extract schema from tool definition
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string(),
+        workFolder: z.string().optional(),
         sessionId: z.string().optional()
       });
       
       // Test valid cases
+      expect(() => schema.parse({ prompt: 'test' })).not.toThrow();
       expect(() => schema.parse({ prompt: 'test', workFolder: '/tmp' })).not.toThrow();
       expect(() => schema.parse({ prompt: 'test', workFolder: '/tmp', sessionId: 's1' })).not.toThrow();
-      expect(() => schema.parse({ prompt: 'test' })).toThrow(); // workFolder 必填
     });
 
     it('should reject invalid arguments', async () => {
@@ -123,7 +123,7 @@ describe('Argument Validation Tests', () => {
       // Extract schema from tool definition
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string(),
+        workFolder: z.string().optional(),
         sessionId: z.string().optional()
       });
       
@@ -136,15 +136,14 @@ describe('Argument Validation Tests', () => {
     it('should handle missing required fields', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string(),
+        workFolder: z.string().optional(),
         sessionId: z.string().optional()
       });
       
       try {
         schema.parse({});
       } catch (error: any) {
-        const paths = error.errors.map((issue: any) => issue.path[0]);
-        expect(paths).toEqual(expect.arrayContaining(['prompt', 'workFolder']));
+        expect(error.errors[0].path).toEqual(['prompt']);
         expect(error.errors[0].message).toContain('Required');
       }
     });
@@ -152,29 +151,29 @@ describe('Argument Validation Tests', () => {
     it('should allow optional fields to be undefined', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string(),
+        workFolder: z.string().optional(),
         sessionId: z.string().optional()
       });
       
-      const result = schema.parse({ prompt: 'test', workFolder: '/tmp' });
+      const result = schema.parse({ prompt: 'test' });
+      expect(result.workFolder).toBeUndefined();
       expect(result.sessionId).toBeUndefined();
     });
 
     it('should handle extra fields gracefully', async () => {
       const schema = z.object({
         prompt: z.string(),
-        workFolder: z.string(),
+        workFolder: z.string().optional(),
         sessionId: z.string().optional()
       });
       
       // By default, Zod strips unknown keys
       const result = schema.parse({ 
-        prompt: 'test',
-        workFolder: '/tmp',
+        prompt: 'test', 
         extraField: 'ignored' 
       });
       
-      expect(result).toEqual({ prompt: 'test', workFolder: '/tmp' });
+      expect(result).toEqual({ prompt: 'test' });
       expect(result).not.toHaveProperty('extraField');
     });
   });

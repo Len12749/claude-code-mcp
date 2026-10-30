@@ -18,7 +18,7 @@ Every invocation starts the Claude Code CLI with a fixed set of flags. The calle
 | `--append-system-prompt` | Adds an explicit read-only instruction to the system prompt. |
 | `--output-format json` | Returns only the final answer (errors are surfaced as MCP errors). |
 
-`workFolder` is required, must be an absolute path and is resolved through `realpathSync` before use. This is not an OS-level sandbox, but every tool-level path to a write, shell command or network call is closed.
+`workFolder` is optional: when omitted the server analyses the repository configured in `CLAUDE_CODE_MCP_DEFAULT_ROOT`, which keeps the repository path out of prompts and portable across machines (only the `.env` changes). A supplied path must be absolute and, when `CLAUDE_CODE_MCP_ALLOWED_ROOTS` is set, inside that list. Paths are resolved through `realpathSync` before use. This is not an OS-level sandbox, but every tool-level path to a write, shell command or network call is closed.
 
 ## Environment variables
 
@@ -26,7 +26,9 @@ Every invocation starts the Claude Code CLI with a fixed set of flags. The calle
 - `CLAUDE_CLI_NAME`: CLI binary name or absolute path (default: `claude`).
 - `CLAUDE_CLI_TIMEOUT_SECONDS`: Per-call timeout in seconds (default: `3600`).
 - `CLAUDE_CODE_MCP_TOOLS`: Restrict the tool whitelist further, e.g. `Read,Grep`. Values outside `Read,Grep,Glob` are ignored.
+- `CLAUDE_CODE_MCP_DEFAULT_ROOT`: Repository analysed when the caller omits `workFolder`. Set this per machine.
 - `CLAUDE_CODE_MCP_ALLOWED_ROOTS`: Colon-separated directories that `workFolder` must live under. Unset means any existing directory is allowed.
+- `CLAUDE_CODE_MCP_EFFORT`: Reasoning effort passed as `--effort` (default: `low`).
 - `MCP_CLAUDE_DEBUG`: Set to `true` for verbose logging on stderr.
 
 ## Requirements
@@ -62,12 +64,12 @@ NODE_BIN_DIR=/path/to/node/bin
 
 ## Tool: `claude_code`
 
-Runs a read-only analysis of `workFolder` through Claude Code.
+Runs a read-only analysis of the configured repository (or of `workFolder`) through Claude Code.
 
 **Arguments:**
 
 - `prompt` (string, required): The analysis question or instruction.
-- `workFolder` (string, required): Absolute path of the repository/directory to analyse. This is the only directory the model can read.
+- `workFolder` (string, optional): Directory to analyse. Omit it in normal use so the server's `CLAUDE_CODE_MCP_DEFAULT_ROOT` applies; a supplied path must be absolute and inside the allow-list.
 - `sessionId` (string, optional): Parent session ID; repeated calls with the same ID resume the same Claude Code session.
 - `messages` (array, optional): Conversation history to inject on the first call of a session.
 - `stateless` (boolean, optional): Disable session continuity for this call.
@@ -78,8 +80,7 @@ Runs a read-only analysis of `workFolder` through Claude Code.
 {
   "toolName": "claude_code:claude_code",
   "arguments": {
-    "prompt": "Explain the request pipeline and point out where retries are implemented.",
-    "workFolder": "/Users/me/projects/api"
+    "prompt": "Explain the request pipeline and point out where retries are implemented."
   }
 }
 ```
@@ -94,7 +95,7 @@ Runs a read-only analysis of `workFolder` through Claude Code.
 
 ## Troubleshooting
 
-- **`workFolder does not exist` / `must be an absolute path`**: pass an absolute path to an existing directory, and make sure it is inside `CLAUDE_CODE_MCP_ALLOWED_ROOTS` when that variable is set.
+- **`workFolder does not exist` / `must be an absolute path`**: check `CLAUDE_CODE_MCP_DEFAULT_ROOT`, or pass an absolute path that is inside `CLAUDE_CODE_MCP_ALLOWED_ROOTS`.
 - **`Claude CLI not found`**: set `CLAUDE_CLI_PATH` to the binary (for a local install: `node_modules/.bin/claude`).
 - **`Claude CLI command timed out`**: split the question into smaller ones or raise `CLAUDE_CLI_TIMEOUT_SECONDS`.
 - **DeepSeek / third-party endpoints**: set `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`; a local proxy is needed on some networks (`HTTPS_PROXY`).

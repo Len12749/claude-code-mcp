@@ -65,7 +65,7 @@ describe('Claude Code MCP E2E Tests', () => {
               type: 'boolean',
             }),
           }),
-          required: ['prompt', 'workFolder'],
+          required: ['prompt'],
         }),
       });
     });
@@ -94,12 +94,13 @@ describe('Claude Code MCP E2E Tests', () => {
       ).rejects.toThrow();
     });
 
-    it('should reject calls without workFolder', async () => {
+    it('should reject a relative workFolder', async () => {
       await expect(
         client.callTool('claude_code', {
           prompt: 'List files in current directory',
+          workFolder: 'relative/dir',
         })
-      ).rejects.toThrow(/workFolder/);
+      ).rejects.toThrow(/absolute/);
     });
   });
 
