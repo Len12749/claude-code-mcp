@@ -69,6 +69,16 @@ export function resolveClaudeCliTimeoutMs(envValue = process.env.CLAUDE_CLI_TIME
 }
 
 /**
+ * 思考强度:CLI 只接受 low/medium/high/xhigh/max,缺席或非法值一律用最低档。
+ */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export function resolveEffortLevel(envValue = process.env.CLAUDE_CODE_MCP_EFFORT): string {
+  const raw = envValue?.trim().toLowerCase();
+  return raw && (EFFORT_LEVELS as readonly string[]).includes(raw) ? raw : 'low';
+}
+
+/**
  * 解析只读工具白名单。环境变量只能在此基础上收窄,不能引入 Bash/Edit/Write 等工具。
  */
 export function resolveReadOnlyTools(envValue = process.env.CLAUDE_CODE_MCP_TOOLS): string[] {
@@ -587,6 +597,8 @@ export class ClaudeCodeServer {
           '--strict-mcp-config',
           '--append-system-prompt', READ_ONLY_SYSTEM_PROMPT,
           '--output-format', 'json',
+          // 默认最低思考强度,降低单次分析的响应时间
+          '--effort', resolveEffortLevel(),
         ];
         const useSessionContinuity = !stateless && typeof sessionId === 'string' && sessionId.length > 0;
 
